@@ -3,6 +3,7 @@ use aws_config::BehaviorVersion;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
+use aws_smithy_types::body::SdkBody;
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -12,10 +13,16 @@ use axum::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use dotenv::dotenv;
+use futures_util::stream::{Stream, StreamExt};
+use http_body_util::StreamBody;
+use hyper::body::Frame;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
@@ -28,9 +35,25 @@ struct Claims {
 #[derive(Clone)]
 struct AppState {
     s3_client: S3Client,
-    jwt_secret: String,
     s3_bucket: String,
+    jwt_secret: String,
 }
+
+// A wrapper stream that implements Sync
+struct SyncStream {
+    rx: mpsc::Receiver<Result<Frame<bytes::Bytes>, std::io::Error>>,
+}
+
+impl Stream for SyncStream {
+    type Item = Result<Frame<bytes::Bytes>, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+// Safety: We ensure the receiver is only used from one task at a time
+unsafe impl Sync for SyncStream {}
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
@@ -70,15 +93,43 @@ async fn upload_handler(
         Err(e) => return e.into_response(),
     };
 
-    // Convert axum body to bytes first, then to ByteStream
-    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return AppError::Internal(anyhow::anyhow!("Failed to read body: {}", e))
-                .into_response()
+    // Create a channel for streaming data
+    let (tx, rx) = mpsc::channel::<Result<Frame<bytes::Bytes>, std::io::Error>>(16);
+
+    // Spawn a task to read from the body and send to the channel
+    let data_stream = body.into_data_stream();
+    tokio::spawn(async move {
+        let mut stream = data_stream;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if tx.send(Ok(Frame::data(bytes))).await.is_err() {
+                        // Receiver dropped, stop sending
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Body stream error: {}", e),
+                        )))
+                        .await;
+                    break;
+                }
+            }
         }
-    };
-    let byte_stream = ByteStream::from(body_bytes.to_vec());
+    });
+
+    // Create a stream from the receiver that implements Sync
+    let sync_stream = SyncStream { rx };
+
+    // Create StreamBody from our sync stream
+    let stream_body = StreamBody::new(sync_stream);
+
+    // Convert to SdkBody and ByteStream
+    let sdk_body = SdkBody::from_body_1_x(stream_body);
+    let byte_stream = ByteStream::new(sdk_body);
 
     // Convert hex SHA256 to base64 for S3 checksum header
     let sha256_bytes = match hex::decode(&claims.sha256) {
