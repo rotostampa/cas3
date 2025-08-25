@@ -29,6 +29,7 @@ use tracing::{error, info};
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sha256: String,
+    content_length: i64,
     exp: usize, // Expiration time
 }
 
@@ -146,6 +147,7 @@ async fn upload_handler(
         .bucket(&state.s3_bucket)
         .key(&claims.sha256)
         .body(byte_stream)
+        .content_length(claims.content_length) // Set content length from JWT to avoid chunked encoding
         .checksum_sha256(general_purpose::STANDARD.encode(&sha256_bytes)); // S3 expects base64-encoded checksum
 
     // Forward relevant headers to S3
