@@ -80,9 +80,6 @@ async fn upload_handler(
     };
     let byte_stream = ByteStream::from(body_bytes.to_vec());
 
-    // Use SHA256 from JWT as the S3 key
-    let s3_key = &claims.sha256;
-
     // Convert hex SHA256 to base64 for S3 checksum header
     let sha256_bytes = match hex::decode(&claims.sha256) {
         Ok(bytes) => bytes,
@@ -90,16 +87,15 @@ async fn upload_handler(
             return AppError::Internal(anyhow::anyhow!("Invalid SHA256 hex: {}", e)).into_response()
         }
     };
-    let sha256_base64 = general_purpose::STANDARD.encode(&sha256_bytes);
 
     // Create S3 PUT request
     let mut put_object = state
         .s3_client
         .put_object()
         .bucket(&state.s3_bucket)
-        .key(s3_key)
+        .key(&claims.sha256)
         .body(byte_stream)
-        .checksum_sha256(&sha256_base64); // S3 expects base64-encoded checksum
+        .checksum_sha256(general_purpose::STANDARD.encode(&sha256_bytes)); // S3 expects base64-encoded checksum
 
     // Forward relevant headers to S3
     if let Some(content_type) = headers.get("content-type") {
