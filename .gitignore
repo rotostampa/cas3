@@ -1,3 +1,4 @@
 /target
 /storage
 .DS_Store
+.env
