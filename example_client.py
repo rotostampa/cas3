@@ -60,13 +60,20 @@ def upload_file(file_path, server_url, jwt_secret):
             headers={'Content-Type': 'application/octet-stream'}
         )
 
-    print(f"Response: {response.status_code}")
+    print(f"Response Status: {response.status_code}")
+    print(f"Response Headers: {dict(response.headers)}")
+    print(f"Response Body: {response.text}")
+
     if response.status_code == 200:
         print("✅ Upload successful!")
         if response.headers.get('etag'):
-            print(f"ETag: {response.headers['etag']}")
+            print(f"S3 ETag: {response.headers['etag']}")
+        if response.headers.get('x-amz-version-id'):
+            print(f"S3 Version ID: {response.headers['x-amz-version-id']}")
     else:
-        print(f"❌ Upload failed: {response.text}")
+        print(f"❌ Upload failed!")
+        print(f"Full error response: {response.text}")
+        print(f"Response headers: {dict(response.headers)}")
 
     return response.status_code == 200
 

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use aws_config::BehaviorVersion;
+use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use axum::{
@@ -9,6 +10,7 @@ use axum::{
     routing::put,
     Router,
 };
+use base64::{engine::general_purpose, Engine as _};
 use dotenv::dotenv;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
@@ -62,22 +64,38 @@ async fn upload_handler(
     Path(token): Path<String>,
     headers: HeaderMap,
     body: axum::body::Body,
-) -> Result<impl IntoResponse, AppError> {
+) -> impl IntoResponse {
     // Decode and validate JWT
-    let claims = validate_jwt(&token, &state.jwt_secret)?;
+    let claims = match validate_jwt(&token, &state.jwt_secret) {
+        Ok(claims) => claims,
+        Err(e) => return e.into_response(),
+    };
     info!(
         "Processing upload for SHA256: {}, expected length: {}",
         claims.sha256, claims.content_length
     );
 
     // Convert axum body to bytes first, then to ByteStream
-    let body_bytes = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to read body: {}", e)))?;
+    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return AppError::Internal(anyhow::anyhow!("Failed to read body: {}", e))
+                .into_response()
+        }
+    };
     let byte_stream = ByteStream::from(body_bytes.to_vec());
 
     // Use SHA256 from JWT as the S3 key
     let s3_key = &claims.sha256;
+
+    // Convert hex SHA256 to base64 for S3 checksum header
+    let sha256_bytes = match hex::decode(&claims.sha256) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return AppError::Internal(anyhow::anyhow!("Invalid SHA256 hex: {}", e)).into_response()
+        }
+    };
+    let sha256_base64 = general_purpose::STANDARD.encode(&sha256_bytes);
 
     // Create S3 PUT request
     let mut put_object = state
@@ -87,7 +105,7 @@ async fn upload_handler(
         .key(s3_key)
         .body(byte_stream)
         .content_length(claims.content_length as i64)
-        .checksum_sha256(&claims.sha256); // This makes S3 verify the SHA256
+        .checksum_sha256(&sha256_base64); // S3 expects base64-encoded checksum
 
     // Forward relevant headers to S3
     if let Some(content_type) = headers.get("content-type") {
@@ -98,26 +116,43 @@ async fn upload_handler(
 
     // Execute S3 upload - S3 will verify the SHA256
     info!("Forwarding request to S3 with key: {}", s3_key);
-    let result = put_object
-        .send()
-        .await
-        .map_err(|e| AppError::S3Error(format!("S3 upload failed: {}", e)))?;
 
-    info!("Successfully uploaded to S3 with key: {}", s3_key);
+    match put_object.send().await {
+        Ok(_result) => {
+            info!("Successfully uploaded to S3 with key: {}", s3_key);
 
-    // Return S3 response information
-    let mut response_headers = HeaderMap::new();
+            // S3 upload successful, return 200 OK
+            StatusCode::OK.into_response()
+        }
+        Err(e) => {
+            // Log the detailed error for debugging
+            error!("S3 upload failed with error: {:#?}", e);
 
-    if let Some(etag) = result.e_tag() {
-        response_headers.insert("etag", etag.parse().unwrap());
+            // Extract HTTP status code and response body from S3 error
+            match &e {
+                SdkError::ServiceError(service_err) => {
+                    let status_code = service_err.raw().status().as_u16();
+                    let response_body = format!("S3 Error: {}", service_err.err());
+
+                    info!(
+                        "S3 returned status {} with error: {}",
+                        status_code, response_body
+                    );
+
+                    (
+                        StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
+                        response_body,
+                    )
+                        .into_response()
+                }
+                _ => {
+                    let error_msg = format!("S3 request failed: {}", e);
+                    error!("{}", error_msg);
+                    (StatusCode::BAD_GATEWAY, error_msg).into_response()
+                }
+            }
+        }
     }
-
-    if let Some(version_id) = result.version_id() {
-        response_headers.insert("x-amz-version-id", version_id.parse().unwrap());
-    }
-
-    // Return successful response similar to what S3 would return
-    Ok((StatusCode::OK, response_headers, ""))
 }
 
 fn validate_jwt(token: &str, secret: &str) -> Result<Claims, AppError> {
