@@ -14,7 +14,7 @@ The binary is created at `target/release/cas3`.
 
 ```bash
 # Store a remote file
-cas3 save https://example.com/file.txt
+cas3 save https://pdf-lib.js.org/assets/american_flag.pdf
 # → Stores the file under ~/.cas3/data/<sha>.  Prints the SHA‑256 hash.
 
 # Store a local file

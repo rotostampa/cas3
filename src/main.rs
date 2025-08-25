@@ -1,6 +1,6 @@
 use std::fs;
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
+use std::path::Path;
 use std::process;
 
 use clap::{Parser, Subcommand};
@@ -148,6 +148,7 @@ fn handle_fetch(sha: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("file://{}", abs_path.display());
     Ok(())
 }
+#[cfg(test)]
 mod tests {
     use super::*;
     use httpmock::Method::GET;
