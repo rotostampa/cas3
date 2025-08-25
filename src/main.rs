@@ -121,7 +121,8 @@ async fn upload_handler(
             // Extract HTTP status code and response body from S3 error
             match &e {
                 SdkError::ServiceError(service_err) => {
-                    let status_code = service_err.raw().status().as_u16();
+                    let status_code = StatusCode::from_u16(service_err.raw().status().as_u16())
+                        .unwrap_or(StatusCode::BAD_GATEWAY);
 
                     // Extract the raw response body bytes from S3
                     let response_body = match service_err.raw().body().bytes() {
@@ -129,11 +130,7 @@ async fn upload_handler(
                         None => service_err.err().to_string().into_bytes(),
                     };
 
-                    (
-                        StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
-                        response_body,
-                    )
-                        .into_response()
+                    (status_code, response_body).into_response()
                 }
                 _ => {
                     let error_msg = format!("S3 request failed: {}", e);
