@@ -22,7 +22,6 @@ use tracing::{error, info};
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sha256: String,
-    content_length: u64,
     exp: usize, // Expiration time
 }
 
@@ -100,7 +99,6 @@ async fn upload_handler(
         .bucket(&state.s3_bucket)
         .key(s3_key)
         .body(byte_stream)
-        .content_length(claims.content_length as i64)
         .checksum_sha256(&sha256_base64); // S3 expects base64-encoded checksum
 
     // Forward relevant headers to S3
@@ -214,7 +212,6 @@ mod tests {
         let secret = "test_secret";
         let claims = Claims {
             sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(), // SHA256 of empty string
-            content_length: 0,
             exp: (SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -234,7 +231,6 @@ mod tests {
             decoded_claims.sha256,
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
-        assert_eq!(decoded_claims.content_length, 0);
     }
 
     #[test]
@@ -248,7 +244,6 @@ mod tests {
         let secret = "test_secret";
         let claims = Claims {
             sha256: "abc123".to_string(),
-            content_length: 1024,
             exp: 1000000000, // Expired timestamp
         };
 
