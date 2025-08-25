@@ -70,10 +70,6 @@ async fn upload_handler(
         Ok(claims) => claims,
         Err(e) => return e.into_response(),
     };
-    info!(
-        "Processing upload for SHA256: {}, expected length: {}",
-        claims.sha256, claims.content_length
-    );
 
     // Convert axum body to bytes first, then to ByteStream
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
@@ -115,29 +111,23 @@ async fn upload_handler(
     }
 
     // Execute S3 upload - S3 will verify the SHA256
-    info!("Forwarding request to S3 with key: {}", s3_key);
 
     match put_object.send().await {
         Ok(_result) => {
-            info!("Successfully uploaded to S3 with key: {}", s3_key);
-
             // S3 upload successful, return 200 OK
             StatusCode::OK.into_response()
         }
         Err(e) => {
-            // Log the detailed error for debugging
-            error!("S3 upload failed with error: {:#?}", e);
-
             // Extract HTTP status code and response body from S3 error
             match &e {
                 SdkError::ServiceError(service_err) => {
                     let status_code = service_err.raw().status().as_u16();
-                    let response_body = format!("S3 Error: {}", service_err.err());
 
-                    info!(
-                        "S3 returned status {} with error: {}",
-                        status_code, response_body
-                    );
+                    // Extract the raw response body bytes from S3
+                    let response_body = match service_err.raw().body().bytes() {
+                        Some(body_bytes) => body_bytes.to_vec(),
+                        None => service_err.err().to_string().into_bytes(),
+                    };
 
                     (
                         StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -147,7 +137,6 @@ async fn upload_handler(
                 }
                 _ => {
                     let error_msg = format!("S3 request failed: {}", e);
-                    error!("{}", error_msg);
                     (StatusCode::BAD_GATEWAY, error_msg).into_response()
                 }
             }
@@ -186,11 +175,8 @@ async fn main() -> Result<()> {
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
 
     // Initialize AWS S3 client
-    info!("Initializing AWS S3 client...");
     let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
     let s3_client = S3Client::new(&config);
-
-    info!("S3 bucket: {}", s3_bucket);
 
     // Create application state
     let app_state = AppState {
@@ -215,7 +201,6 @@ async fn main() -> Result<()> {
     info!("CAS3 proxy server listening on {}", bind_addr);
     info!("Upload endpoint: PUT /upload/{{jwt_token}}");
     info!("Health check: GET /health");
-
     axum::serve(listener, app).await.context("Server failed")?;
 
     Ok(())
