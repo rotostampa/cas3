@@ -22,8 +22,6 @@ use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tower_http::trace::TraceLayer;
-use tracing::{error, info};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -55,29 +53,6 @@ impl Stream for SyncStream {
 // Safety: We ensure the receiver is only used from one task at a time
 unsafe impl Sync for SyncStream {}
 
-#[derive(Debug, thiserror::Error)]
-enum AppError {
-    #[error("Invalid JWT token: {0}")]
-    InvalidToken(String),
-    #[error("Internal error: {0}")]
-    Internal(String),
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            AppError::InvalidToken(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
-            AppError::Internal(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            ),
-        };
-
-        error!("Request failed: {}", error_message);
-        (status, error_message).into_response()
-    }
-}
-
 async fn upload_handler(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -87,7 +62,7 @@ async fn upload_handler(
     // Decode and validate JWT
     let claims = match validate_jwt(&token, &state.jwt_secret) {
         Ok(claims) => claims,
-        Err(e) => return e.into_response(),
+        Err(response) => return response,
     };
 
     // Create a channel for streaming data
@@ -131,7 +106,14 @@ async fn upload_handler(
     // Convert hex SHA256 to base64 for S3 checksum header
     let sha256_bytes = match hex::decode(&claims.sha256) {
         Ok(bytes) => bytes,
-        Err(e) => return AppError::Internal(format!("Invalid SHA256 hex: {}", e)).into_response(),
+        Err(e) => {
+            eprintln!("Request failed: Invalid SHA256 hex: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid SHA256 hex in JWT: {}", e),
+            )
+                .into_response();
+        }
     };
 
     // Create S3 PUT request
@@ -182,14 +164,18 @@ async fn upload_handler(
     }
 }
 
-fn validate_jwt(token: &str, secret: &str) -> Result<Claims, AppError> {
+fn validate_jwt(token: &str, secret: &str) -> Result<Claims, Response> {
     let key = DecodingKey::from_secret(secret.as_ref());
     let validation = Validation::new(Algorithm::HS256);
 
-    let token_data = decode::<Claims>(token, &key, &validation)
-        .map_err(|e| AppError::InvalidToken(e.to_string()))?;
-
-    Ok(token_data.claims)
+    match decode::<Claims>(token, &key, &validation) {
+        Ok(token_data) => Ok(token_data.claims),
+        Err(e) => {
+            let error_message = format!("Invalid JWT token: {}", e);
+            eprintln!("Request failed: {}", error_message);
+            Err((StatusCode::UNAUTHORIZED, error_message).into_response())
+        }
+    }
 }
 
 async fn health_check() -> &'static str {
@@ -200,9 +186,6 @@ async fn health_check() -> &'static str {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load .env file
     dotenv().ok();
-
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
 
     // Load configuration from environment
     let jwt_secret =
@@ -228,18 +211,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/upload/{token}", put(upload_handler))
         .route("/health", axum::routing::get(health_check))
-        .layer(TraceLayer::new_for_http())
         .with_state(app_state);
 
     // Start server
-    info!("Starting server on {}", bind_addr);
+    println!("Starting server on {}", bind_addr);
     let listener = TcpListener::bind(&bind_addr)
         .await
         .map_err(|e| format!("Failed to bind to {}: {}", bind_addr, e))?;
 
-    info!("CAS3 proxy server listening on {}", bind_addr);
-    info!("Upload endpoint: PUT /upload/{{jwt_token}}");
-    info!("Health check: GET /health");
+    println!("CAS3 proxy server listening on {}", bind_addr);
+    println!("Upload endpoint: PUT /upload/{{jwt_token}}");
+    println!("Health check: GET /health");
     axum::serve(listener, app)
         .await
         .map_err(|e| format!("Server failed: {}", e))?;
