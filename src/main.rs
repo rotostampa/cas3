@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::ByteStream;
@@ -60,17 +59,14 @@ unsafe impl Sync for SyncStream {}
 enum AppError {
     #[error("Invalid JWT token: {0}")]
     InvalidToken(String),
-    #[error("S3 error: {0}")]
-    S3Error(String),
     #[error("Internal error: {0}")]
-    Internal(#[from] anyhow::Error),
+    Internal(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
             AppError::InvalidToken(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
-            AppError::S3Error(msg) => (StatusCode::BAD_GATEWAY, msg),
             AppError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
@@ -111,10 +107,10 @@ async fn upload_handler(
                 }
                 Err(e) => {
                     let _ = tx
-                        .send(Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Body stream error: {}", e),
-                        )))
+                        .send(Err(std::io::Error::other(format!(
+                            "Body stream error: {}",
+                            e
+                        ))))
                         .await;
                     break;
                 }
@@ -135,9 +131,7 @@ async fn upload_handler(
     // Convert hex SHA256 to base64 for S3 checksum header
     let sha256_bytes = match hex::decode(&claims.sha256) {
         Ok(bytes) => bytes,
-        Err(e) => {
-            return AppError::Internal(anyhow::anyhow!("Invalid SHA256 hex: {}", e)).into_response()
-        }
+        Err(e) => return AppError::Internal(format!("Invalid SHA256 hex: {}", e)).into_response(),
     };
 
     // Create S3 PUT request
@@ -203,7 +197,7 @@ async fn health_check() -> &'static str {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load .env file
     dotenv().ok();
 
@@ -212,9 +206,10 @@ async fn main() -> Result<()> {
 
     // Load configuration from environment
     let jwt_secret =
-        env::var("JWT_SECRET").context("JWT_SECRET environment variable is required")?;
+        env::var("JWT_SECRET").map_err(|_| "JWT_SECRET environment variable is required")?;
 
-    let s3_bucket = env::var("S3_BUCKET").context("S3_BUCKET environment variable is required")?;
+    let s3_bucket =
+        env::var("S3_BUCKET").map_err(|_| "S3_BUCKET environment variable is required")?;
 
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
 
@@ -240,12 +235,14 @@ async fn main() -> Result<()> {
     info!("Starting server on {}", bind_addr);
     let listener = TcpListener::bind(&bind_addr)
         .await
-        .with_context(|| format!("Failed to bind to {}", bind_addr))?;
+        .map_err(|e| format!("Failed to bind to {}: {}", bind_addr, e))?;
 
     info!("CAS3 proxy server listening on {}", bind_addr);
     info!("Upload endpoint: PUT /upload/{{jwt_token}}");
     info!("Health check: GET /health");
-    axum::serve(listener, app).await.context("Server failed")?;
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| format!("Server failed: {}", e))?;
 
     Ok(())
 }
