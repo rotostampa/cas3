@@ -63,7 +63,7 @@ async fn upload_handler(
     // Decode and validate JWT
     let claims = match validate_jwt(&token, &state.jwt_secret) {
         Ok(claims) => claims,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     // Create a channel for streaming data
@@ -165,7 +165,7 @@ async fn upload_handler(
     }
 }
 
-fn validate_jwt(token: &str, secret: &str) -> Result<Claims, Response> {
+fn validate_jwt(token: &str, secret: &str) -> Result<Claims, Box<Response>> {
     let key = DecodingKey::from_secret(secret.as_ref());
     let validation = Validation::new(Algorithm::HS256);
 
@@ -174,7 +174,9 @@ fn validate_jwt(token: &str, secret: &str) -> Result<Claims, Response> {
         Err(e) => {
             let error_message = format!("Invalid JWT token: {}", e);
             eprintln!("Request failed: {}", error_message);
-            Err((StatusCode::UNAUTHORIZED, error_message).into_response())
+            Err(Box::new(
+                (StatusCode::UNAUTHORIZED, error_message).into_response(),
+            ))
         }
     }
 }
