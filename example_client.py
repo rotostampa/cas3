@@ -8,6 +8,8 @@ pip install PyJWT requests
 
 Usage:
 python example_client.py <file_path> [server_url] [jwt_secret]
+
+By default, jwt_secret will use the CAS3_JWT_SECRET environment variable if not provided.
 """
 
 import sys
@@ -16,6 +18,7 @@ import jwt
 import requests
 import time
 from pathlib import Path
+import os
 
 def calculate_sha256(file_path):
     """Calculate SHA256 hash of a file."""
@@ -81,11 +84,12 @@ def main():
     if len(sys.argv) < 2:
         print("Usage: python example_client.py <file_path> [server_url] [jwt_secret]")
         print("Example: python example_client.py test.txt http://localhost:3000 mysecret")
+        print("Note: jwt_secret defaults to CAS3_JWT_SECRET environment variable if not provided")
         sys.exit(1)
 
     file_path = sys.argv[1]
     server_url = sys.argv[2] if len(sys.argv) > 2 else "http://localhost:3000"
-    jwt_secret = sys.argv[3] if len(sys.argv) > 3 else "test_secret"
+    jwt_secret = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("CAS3_JWT_SECRET", "test_secret")
 
     if not Path(file_path).exists():
         print(f"❌ File not found: {file_path}")

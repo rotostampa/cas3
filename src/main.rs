@@ -35,6 +35,7 @@ struct AppState {
     s3_client: S3Client,
     s3_bucket: String,
     jwt_secret: String,
+    s3_key_prefix: String,
 }
 
 // A wrapper stream that implements Sync
@@ -121,7 +122,7 @@ async fn upload_handler(
         .s3_client
         .put_object()
         .bucket(&state.s3_bucket)
-        .key(&claims.sha256)
+        .key(format!("{}{}", state.s3_key_prefix, claims.sha256))
         .body(byte_stream)
         .content_length(claims.content_length) // Set content length from JWT to avoid chunked encoding
         .checksum_sha256(general_purpose::STANDARD.encode(&sha256_bytes)); // S3 expects base64-encoded checksum
@@ -188,13 +189,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
     // Load configuration from environment
-    let jwt_secret =
-        env::var("JWT_SECRET").map_err(|_| "JWT_SECRET environment variable is required")?;
+    let jwt_secret = env::var("CAS3_JWT_SECRET")
+        .map_err(|_| "CAS3_JWT_SECRET environment variable is required")?;
 
     let s3_bucket =
-        env::var("S3_BUCKET").map_err(|_| "S3_BUCKET environment variable is required")?;
+        env::var("CAS3_BUCKET").map_err(|_| "CAS3_BUCKET environment variable is required")?;
 
-    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let bind_addr = env::var("CAS3_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+
+    let s3_key_prefix = env::var("CAS3_S3_KEY_PREFIX").unwrap_or_else(|_| "".to_string());
 
     // Initialize AWS S3 client
     let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
@@ -205,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         s3_client,
         jwt_secret,
         s3_bucket,
+        s3_key_prefix,
     };
 
     // Build our application with routes
