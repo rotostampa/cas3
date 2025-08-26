@@ -206,7 +206,7 @@ Examples:
 
 ## License
 
-[Your License Here]
+This project is licensed under the MIT License. See the LICENSE file for details.
 
 ## Contributing
 
