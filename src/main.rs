@@ -199,39 +199,28 @@ async fn upload_handler(
     }
 }
 
-async fn health_check() -> &'static str {
-    "OK"
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load .env file
     dotenv().ok();
 
     // Load configuration from environment
-    let jwt_secret = env::var("CAS3_JWT_SECRET")
-        .map_err(|_| "CAS3_JWT_SECRET environment variable is required")?;
-
-    let s3_bucket =
-        env::var("CAS3_BUCKET").map_err(|_| "CAS3_BUCKET environment variable is required")?;
-
     let bind_addr = env::var("CAS3_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
-
-    let s3_key_prefix = env::var("CAS3_S3_KEY_PREFIX").unwrap_or_else(|_| "".to_string());
 
     // Initialize AWS S3 client
     let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
-    let s3_client = S3Client::new(&config);
 
     // Build our application with routes
     let app = Router::new()
         .route("/upload/{token}", put(upload_handler))
-        .route("/health", axum::routing::get(health_check))
+        .route("/health", axum::routing::get(|| async { "OK" }))
         .with_state(AppState {
-            s3_client,
-            jwt_secret,
-            s3_bucket,
-            s3_key_prefix,
+            s3_client: S3Client::new(&config),
+            jwt_secret: env::var("CAS3_JWT_SECRET")
+                .map_err(|_| "CAS3_JWT_SECRET environment variable is required")?,
+            s3_bucket: env::var("CAS3_BUCKET")
+                .map_err(|_| "CAS3_BUCKET environment variable is required")?,
+            s3_key_prefix: env::var("CAS3_S3_KEY_PREFIX").unwrap_or_else(|_| "".to_string()),
         });
 
     // Start server
