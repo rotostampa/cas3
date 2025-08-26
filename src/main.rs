@@ -153,12 +153,12 @@ async fn upload_handler(
         .checksum_sha256(general_purpose::STANDARD.encode(&sha256_bytes)); // S3 expects base64-encoded checksum
 
     // Use auto-detected content-type, fallback to client header if detection fails
-    if let Some(detected_ct) = detected_content_type {
-        put_object = put_object.content_type(detected_ct);
-    } else if let Some(content_type) = headers.get("content-type") {
-        if let Ok(ct) = content_type.to_str() {
-            put_object = put_object.content_type(ct);
-        }
+    if let Some(content_type) = detected_content_type.or_else(|| {
+        headers
+            .get("content-type")
+            .and_then(|ct| ct.to_str().ok().map(|s| s.to_string()))
+    }) {
+        put_object = put_object.content_type(content_type);
     }
 
     // Execute S3 upload - S3 will verify the SHA256
