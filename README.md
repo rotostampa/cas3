@@ -133,34 +133,39 @@ def create_jwt_token(sha256_hash, content_length, secret):
         'exp': int(time.time()) + 3600  # Token expires in 1 hour
     }
     return jwt.encode(payload, secret, algorithm='HS256')
+
+def make_jwt_from_file(file_path, secret):
+    """Create JWT token directly from a file."""
+    # Calculate SHA256 hash
+    sha256_hash = calculate_sha256(file_path)
+
+    # Get file size
+    content_length = os.path.getsize(file_path)
+
+    # Create and return JWT token
+    return create_jwt_token(sha256_hash, content_length, secret)
 ```
 
-## Client Example
+## Client Usage
 
-A complete Python client example is provided in `example_client.py`.
+### Creating and Using JWT Tokens
 
-### Basic Usage
-
-```bash
-# Upload a file using default settings
-python example_client.py myfile.pdf
-
-# Upload to a specific server with custom JWT secret
-python example_client.py myfile.pdf http://localhost:3000 mysecret
+```python
+# Create JWT token from a file directly
+token = make_jwt_from_file("myfile.pdf", os.environ["CAS3_JWT_SECRET"])
 ```
 
 ### Full Upload Example
 
 ```python
 import requests
+import os
 
 # File details
 file_path = "document.pdf"
-sha256_hash = calculate_sha256(file_path)
-content_length = os.path.getsize(file_path)
 
-# Create JWT token (using CAS3_JWT_SECRET from environment)
-token = create_jwt_token(sha256_hash, content_length, os.environ["CAS3_JWT_SECRET"])
+# Create JWT token from file
+token = make_jwt_from_file(file_path, os.environ["CAS3_JWT_SECRET"])
 
 # Upload file
 with open(file_path, 'rb') as f:
@@ -198,19 +203,6 @@ Examples:
 - With prefix `hashstore/`: `hashstore/a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3`
 - With prefix `cas3/files/`: `cas3/files/a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3`
 
-## Testing
-
-You can test the server using the provided `example_client.py`:
-
-```bash
-# Create a test file
-echo "Hello, CAS3!" > test.txt
-
-# Upload it
-python example_client.py test.txt http://localhost:3000 your-jwt-secret
-
-# The file will be stored in S3 based on its SHA-256 hash
-```
 
 ## License
 
