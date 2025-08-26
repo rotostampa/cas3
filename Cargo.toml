@@ -1,9 +1,10 @@
 [package]
 name = "cas3"
-edition = "2021"
 version = "0.1.0"
+edition = "2021"
 
 [dependencies]
+infer = "0.16"
 aws-config = "1.8.5"
 aws-sdk-s3 = "1.103.0"
 aws-smithy-types = "1.3"

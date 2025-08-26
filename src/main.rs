@@ -1,6 +1,6 @@
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::error::SdkError;
-use aws_sdk_s3::presigning::PresigningConfig;
+
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use aws_smithy_types::body::SdkBody;
@@ -13,15 +13,17 @@ use axum::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use dotenv::dotenv;
+
 use futures_util::stream::{Stream, StreamExt};
 use http_body_util::StreamBody;
 use hyper::body::Frame;
+use infer;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
-use std::time::Duration;
+
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
@@ -88,18 +90,42 @@ async fn upload_handler(
         }
     };
 
+    // Get the first chunk to detect content type
+    let mut data_stream = body.into_data_stream();
+    let first_chunk = match data_stream.next().await {
+        Some(Ok(bytes)) => bytes,
+        Some(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Error reading request body: {}", e),
+            )
+                .into_response();
+        }
+        None => {
+            return (StatusCode::BAD_REQUEST, "Empty request body").into_response();
+        }
+    };
+
+    // Always try to detect content type from first chunk (don't trust client)
+    let detected_content_type = infer::get(&first_chunk).map(|kind| kind.mime_type().to_string());
+
     // Create a channel for streaming data
     let (sender, receiver) = mpsc::channel::<Result<Frame<bytes::Bytes>, std::io::Error>>(16);
 
-    // Spawn a task to read from the body and send to the channel
+    // Spawn a task to send the first chunk and then the rest of the stream
     tokio::spawn(async move {
-        let mut data_stream = body.into_data_stream();
+        // Send the first chunk we already read
+        if sender.send(Ok(Frame::data(first_chunk))).await.is_err() {
+            return;
+        }
+
+        // Send the rest of the stream
         while let Some(chunk) = data_stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     if sender.send(Ok(Frame::data(bytes))).await.is_err() {
                         // Receiver dropped, stop sending
-                        break;
+                        return;
                     }
                 }
                 Err(e) => {
@@ -109,7 +135,7 @@ async fn upload_handler(
                             e
                         ))))
                         .await;
-                    break;
+                    return;
                 }
             }
         }
@@ -134,8 +160,10 @@ async fn upload_handler(
         .content_length(claims.content_length) // Set content length from JWT to avoid chunked encoding
         .checksum_sha256(general_purpose::STANDARD.encode(&sha256_bytes)); // S3 expects base64-encoded checksum
 
-    // Forward relevant headers to S3
-    if let Some(content_type) = headers.get("content-type") {
+    // Use auto-detected content-type, fallback to client header if detection fails
+    if let Some(detected_ct) = detected_content_type {
+        put_object = put_object.content_type(detected_ct);
+    } else if let Some(content_type) = headers.get("content-type") {
         if let Ok(ct) = content_type.to_str() {
             put_object = put_object.content_type(ct);
         }
@@ -195,19 +223,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
     let s3_client = S3Client::new(&config);
 
-    // Create application state
-    let app_state = AppState {
-        s3_client,
-        jwt_secret,
-        s3_bucket,
-        s3_key_prefix,
-    };
-
     // Build our application with routes
     let app = Router::new()
         .route("/upload/{token}", put(upload_handler))
         .route("/health", axum::routing::get(health_check))
-        .with_state(app_state);
+        .with_state(AppState {
+            s3_client,
+            jwt_secret,
+            s3_bucket,
+            s3_key_prefix,
+        });
 
     // Start server
     println!("Starting server on {}", bind_addr);
