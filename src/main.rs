@@ -120,9 +120,9 @@ async fn upload_handler(
         }
 
         // Send the rest of the stream
-        while let Some(chunk) = data_stream.next().await {
-            match chunk {
-                Ok(bytes) => {
+        loop {
+            match data_stream.next().await {
+                Some(Ok(bytes)) => {
                     if sender.send(Ok(Frame::data(bytes))).await.is_err() {
                         // Receiver dropped, stop sending
                         return;
@@ -150,7 +150,7 @@ async fn upload_handler(
         .key(format!("{}{}", state.s3_key_prefix, claims.sha256))
         .body(request_bytes)
         .checksum_sha256(general_purpose::STANDARD.encode(&sha256_bytes)) // S3 expects base64-encoded checksum
-        .content_length(claims.content_length)
+        .content_length(claims.content_length) // Set content length from JWT to avoid chunked encoding
         .content_type(
             detected_content_type
                 .or_else(|| {
