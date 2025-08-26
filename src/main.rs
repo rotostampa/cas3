@@ -1,12 +1,13 @@
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use aws_smithy_types::body::SdkBody;
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::put,
     Router,
 };
@@ -20,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
@@ -39,20 +41,17 @@ struct AppState {
 }
 
 // A wrapper stream that implements Sync
-struct SyncStream {
-    rx: mpsc::Receiver<Result<Frame<bytes::Bytes>, std::io::Error>>,
+struct ReceiverStream {
+    receiver: mpsc::Receiver<Result<Frame<bytes::Bytes>, std::io::Error>>,
 }
 
-impl Stream for SyncStream {
+impl Stream for ReceiverStream {
     type Item = Result<Frame<bytes::Bytes>, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
+        self.receiver.poll_recv(cx)
     }
 }
-
-// Safety: We ensure the receiver is only used from one task at a time
-unsafe impl Sync for SyncStream {}
 
 async fn upload_handler(
     State(state): State<AppState>,
@@ -60,29 +59,51 @@ async fn upload_handler(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> impl IntoResponse {
-    // Decode and validate JWT
-    let claims = match validate_jwt(&token, &state.jwt_secret) {
-        Ok(claims) => claims,
-        Err(response) => return *response,
+    // Decode and validate JWT - inlined validate_jwt function
+    let claims = {
+        let key = DecodingKey::from_secret(state.jwt_secret.as_ref());
+        let validation = Validation::new(Algorithm::HS256);
+
+        match decode::<Claims>(&token, &key, &validation) {
+            Ok(token_data) => token_data.claims,
+            Err(e) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    format!("Invalid JWT token: {}", e),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // Convert hex SHA256 to base64 for S3 checksum header
+    let sha256_bytes = match hex::decode(&claims.sha256) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid SHA256 hex in JWT: {}", e),
+            )
+                .into_response();
+        }
     };
 
     // Create a channel for streaming data
-    let (tx, rx) = mpsc::channel::<Result<Frame<bytes::Bytes>, std::io::Error>>(16);
+    let (sender, receiver) = mpsc::channel::<Result<Frame<bytes::Bytes>, std::io::Error>>(16);
 
     // Spawn a task to read from the body and send to the channel
-    let data_stream = body.into_data_stream();
     tokio::spawn(async move {
-        let mut stream = data_stream;
-        while let Some(chunk) = stream.next().await {
+        let mut data_stream = body.into_data_stream();
+        while let Some(chunk) = data_stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    if tx.send(Ok(Frame::data(bytes))).await.is_err() {
+                    if sender.send(Ok(Frame::data(bytes))).await.is_err() {
                         // Receiver dropped, stop sending
                         break;
                     }
                 }
                 Err(e) => {
-                    let _ = tx
+                    let _ = sender
                         .send(Err(std::io::Error::other(format!(
                             "Body stream error: {}",
                             e
@@ -95,27 +116,13 @@ async fn upload_handler(
     });
 
     // Create a stream from the receiver that implements Sync
-    let sync_stream = SyncStream { rx };
+    let request_stream = ReceiverStream { receiver };
 
     // Create StreamBody from our sync stream
-    let stream_body = StreamBody::new(sync_stream);
+    let request_body = StreamBody::new(request_stream);
 
     // Convert to SdkBody and ByteStream
-    let sdk_body = SdkBody::from_body_1_x(stream_body);
-    let byte_stream = ByteStream::new(sdk_body);
-
-    // Convert hex SHA256 to base64 for S3 checksum header
-    let sha256_bytes = match hex::decode(&claims.sha256) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("Request failed: Invalid SHA256 hex: {}", e);
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Invalid SHA256 hex in JWT: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let request_bytes = ByteStream::new(SdkBody::from_body_1_x(request_body));
 
     // Create S3 PUT request
     let mut put_object = state
@@ -123,7 +130,7 @@ async fn upload_handler(
         .put_object()
         .bucket(&state.s3_bucket)
         .key(format!("{}{}", state.s3_key_prefix, claims.sha256))
-        .body(byte_stream)
+        .body(request_bytes)
         .content_length(claims.content_length) // Set content length from JWT to avoid chunked encoding
         .checksum_sha256(general_purpose::STANDARD.encode(&sha256_bytes)); // S3 expects base64-encoded checksum
 
@@ -135,10 +142,9 @@ async fn upload_handler(
     }
 
     // Execute S3 upload - S3 will verify the SHA256
-
     match put_object.send().await {
         Ok(_result) => {
-            // S3 upload successful, return 200 OK
+            // S3 upload successful, get presigned URL for the object
             StatusCode::OK.into_response()
         }
         Err(e) => {
@@ -161,22 +167,6 @@ async fn upload_handler(
                     (StatusCode::BAD_GATEWAY, error_msg).into_response()
                 }
             }
-        }
-    }
-}
-
-fn validate_jwt(token: &str, secret: &str) -> Result<Claims, Box<Response>> {
-    let key = DecodingKey::from_secret(secret.as_ref());
-    let validation = Validation::new(Algorithm::HS256);
-
-    match decode::<Claims>(token, &key, &validation) {
-        Ok(token_data) => Ok(token_data.claims),
-        Err(e) => {
-            let error_message = format!("Invalid JWT token: {}", e);
-            eprintln!("Request failed: {}", error_message);
-            Err(Box::new(
-                (StatusCode::UNAUTHORIZED, error_message).into_response(),
-            ))
         }
     }
 }
