@@ -143,23 +143,23 @@ async fn upload_handler(
     let request_bytes = ByteStream::new(SdkBody::from_body_1_x(request_body));
 
     // Create S3 PUT request
-    let mut put_object = state
+    let put_object = state
         .s3_client
         .put_object()
         .bucket(&state.s3_bucket)
         .key(format!("{}{}", state.s3_key_prefix, claims.sha256))
         .body(request_bytes)
-        .content_length(claims.content_length) // Set content length from JWT to avoid chunked encoding
-        .checksum_sha256(general_purpose::STANDARD.encode(&sha256_bytes)); // S3 expects base64-encoded checksum
-
-    // Use auto-detected content-type, fallback to client header if detection fails
-    if let Some(content_type) = detected_content_type.or_else(|| {
-        headers
-            .get("content-type")
-            .and_then(|ct| ct.to_str().ok().map(|s| s.to_string()))
-    }) {
-        put_object = put_object.content_type(content_type);
-    }
+        .checksum_sha256(general_purpose::STANDARD.encode(&sha256_bytes)) // S3 expects base64-encoded checksum
+        .content_length(claims.content_length)
+        .content_type(
+            detected_content_type
+                .or_else(|| {
+                    headers
+                        .get("content-type")
+                        .and_then(|ct| ct.to_str().ok().map(|s| s.to_string()))
+                })
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+        );
 
     // Execute S3 upload - S3 will verify the SHA256
     match put_object.send().await {
