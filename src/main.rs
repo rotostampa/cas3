@@ -128,15 +128,7 @@ async fn upload_handler(
                         return;
                     }
                 }
-                Err(e) => {
-                    let _ = sender
-                        .send(Err(std::io::Error::other(format!(
-                            "Body stream error: {}",
-                            e
-                        ))))
-                        .await;
-                    return;
-                }
+                _ => return,
             }
         }
     });
