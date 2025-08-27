@@ -93,7 +93,7 @@ async fn upload_handler(
     // Accumulate chunks until we reach at least 100KB for content type detection
     let mut data_stream = body.into_data_stream();
     let mut detection_bytes = Vec::new();
-    const MIN_BYTES_FOR_DETECTION: usize = 100 * 1024; // 100KB
+    const MIN_BYTES_FOR_DETECTION: usize = 1024; // 1KB
 
     // Collect chunks until we have enough data or stream ends
     while detection_bytes.len() < MIN_BYTES_FOR_DETECTION {
