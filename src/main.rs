@@ -27,6 +27,8 @@ use std::task::{Context as TaskContext, Poll};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+const MIN_BYTES_FOR_DETECTION: usize = 1024; // 1KB
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sha256: String,
@@ -92,8 +94,7 @@ async fn upload_handler(
 
     // Accumulate chunks until we reach at least 100KB for content type detection
     let mut data_stream = body.into_data_stream();
-    let mut detection_bytes = Vec::new();
-    const MIN_BYTES_FOR_DETECTION: usize = 1024; // 1KB
+    let mut detection_bytes = bytes::BytesMut::new();
 
     // Collect chunks until we have enough data or stream ends
     while detection_bytes.len() < MIN_BYTES_FOR_DETECTION {
@@ -119,9 +120,6 @@ async fn upload_handler(
         return (StatusCode::BAD_REQUEST, "Empty request body").into_response();
     }
 
-    // Convert to Bytes for detection and streaming
-    let detection_bytes = bytes::Bytes::from(detection_bytes);
-
     // Always try to detect content type from accumulated data (don't trust client)
     let detected_content_type =
         infer::get(&detection_bytes).map(|kind| kind.mime_type().to_string());
@@ -132,7 +130,11 @@ async fn upload_handler(
     // Spawn a task to send the accumulated bytes and then the rest of the stream
     tokio::spawn(async move {
         // Send the accumulated bytes first
-        if sender.send(Ok(Frame::data(detection_bytes))).await.is_err() {
+        if sender
+            .send(Ok(Frame::data(detection_bytes.freeze())))
+            .await
+            .is_err()
+        {
             return;
         }
 
