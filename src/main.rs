@@ -90,32 +90,49 @@ async fn upload_handler(
         }
     };
 
-    // Get the first chunk to detect content type
+    // Accumulate chunks until we reach at least 100KB for content type detection
     let mut data_stream = body.into_data_stream();
-    let first_chunk = match data_stream.next().await {
-        Some(Ok(bytes)) => bytes,
-        Some(Err(e)) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Error reading request body: {}", e),
-            )
-                .into_response();
-        }
-        None => {
-            return (StatusCode::BAD_REQUEST, "Empty request body").into_response();
-        }
-    };
+    let mut detection_bytes = Vec::new();
+    const MIN_BYTES_FOR_DETECTION: usize = 100 * 1024; // 100KB
 
-    // Always try to detect content type from first chunk (don't trust client)
-    let detected_content_type = infer::get(&first_chunk).map(|kind| kind.mime_type().to_string());
+    // Collect chunks until we have enough data or stream ends
+    while detection_bytes.len() < MIN_BYTES_FOR_DETECTION {
+        match data_stream.next().await {
+            Some(Ok(bytes)) => {
+                detection_bytes.extend_from_slice(&bytes);
+            }
+            Some(Err(e)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("Error reading request body: {}", e),
+                )
+                    .into_response();
+            }
+            None => {
+                // Stream ended, break out of loop
+                break;
+            }
+        }
+    }
+
+    if detection_bytes.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Empty request body").into_response();
+    }
+
+    // Convert to Bytes for detection and streaming
+    let detection_bytes = bytes::Bytes::from(detection_bytes);
+
+    // Always try to detect content type from accumulated data (don't trust client)
+    let detected_content_type =
+        infer::get(&detection_bytes).map(|kind| kind.mime_type().to_string());
 
     // Create a channel for streaming data
     let (sender, receiver) = mpsc::channel::<Result<Frame<bytes::Bytes>, std::io::Error>>(16);
 
-    // Spawn a task to send the first chunk and then the rest of the stream
+    // Spawn a task to send the accumulated bytes and then the rest of the stream
     tokio::spawn(async move {
-        // Send the first chunk we already read
-        if sender.send(Ok(Frame::data(first_chunk))).await.is_err() {
+        // Send the accumulated bytes first
+        if sender.send(Ok(Frame::data(detection_bytes))).await.is_err() {
             return;
         }
 
